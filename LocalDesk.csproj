@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net9.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><AssemblyName>LocalDesk</AssemblyName><Version>1.1.0</Version><ApplicationIcon>Assets/LocalDesk.ico</ApplicationIcon></PropertyGroup>
+  <ItemGroup><Content Include="Assets/LocalDesk.ico" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+  <ItemGroup><Content Include="ThirdPartyNotices.txt" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+  <ItemGroup><PackageReference Include="Avalonia" Version="12.1.2"/><PackageReference Include="Avalonia.Desktop" Version="12.1.2"/><PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.2"/></ItemGroup>
+  <ItemGroup Condition="'$(LocalMarkdig)' == ''"><PackageReference Include="Markdig.Signed" Version="0.44.0" /></ItemGroup>
+  <ItemGroup Condition="'$(LocalMarkdig)' != ''"><Reference Include="Markdig.Signed"><HintPath>$(LocalMarkdig)</HintPath><Private>true</Private></Reference></ItemGroup>
+</Project>
