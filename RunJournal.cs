@@ -160,14 +160,15 @@ public sealed partial class MainWindow
                     reply.VerifiedFiles=MergeRecoveredFiles(reply.VerifiedFiles,recovered);
                 }
                 else if(reply.VerifiedFiles.Count==0)reply.EvidenceNote="The saved file baseline is unavailable.";
-                reply.Successful=!ChecksFailed(state);
+                var unverified = EditRunOutcome.MarkUnverified(reply, reply.ExpectedEdits || EditRunOutcome.ExpectsChanges(request.Text));
+                reply.Successful=!unverified && !ChecksFailed(state) && reply.EvidenceNote == null;
                 reply.PauseReason=null;
                 reply.CompletedAt=DateTime.Now;
                 if(reply.Text.Length>0){reply.Summary=reply.Text.Trim();reply.SummaryOffset=0;}
                 Save();
                 RunJournal.Complete(store.Root,chat.Id,state);
                 Show(chat);
-                status.Text="Recovered the finished agent turn and completed its remaining checks.";
+                status.Text=unverified?"Recovered run · No verified file changes.":"Recovered the saved agent turn and completed its remaining checks.";
                 return;
             }
             if(state.LastTool!=null)reply.EvidenceNote="Last recorded tool · "+state.LastTool;

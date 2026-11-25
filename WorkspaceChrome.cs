@@ -62,7 +62,13 @@ public sealed partial class MainWindow
             ("Run setup and acceptance checks", ConfigureRun),
             ("Search project files and notes", ShowProjectSearch),
             ("Search the web and add citations", ShowWebSearch),
-            ("Model library", ManageModels),
+            ("Open a project folder", OpenProjectFolder),
+            ("Model library", () => ManageModels()),
+            ("Model connections", ConfigureConnection),
+            ("Find a model that fits", ShowModelFit),
+            ("Ask a document folder", AskDocuments),
+            ("Project MCP tools", ShowProjectTools),
+            ("Stop reading aloud", () => { StopReading(); return Task.CompletedTask; }),
             ("Model storage", () => ManageModelStorage(this)),
             ("Compare models", CompareModels),
             ("Benchmark GPU context profiles", ShowGpuBenchmark),
@@ -81,13 +87,7 @@ public sealed partial class MainWindow
         foreach (var entry in Projects.Items.Where(p => Directory.Exists(p.Folder)))
             actions.Add(("Project · " + entry, () =>
             {
-                var chat = NewConversation();
-                chat.Mode = "agent";
-                chat.Project = entry.Folder;
-                chat.BuildProject = entry.BuildTarget;
-                Show(chat);
-                Save();
-                RefreshHistory();
+                OpenSavedProject(entry);
                 return Task.CompletedTask;
             }));
         foreach (var choice in availableModels)

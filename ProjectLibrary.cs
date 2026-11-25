@@ -9,6 +9,8 @@ namespace LocalDesk;
 public sealed class SavedProject
 {
     public string Folder { get; set; } = "";
+    public string? Model { get; set; }
+    public string? McpEndpoint { get; set; }
     public string? BuildTarget { get; set; }
     public FocusedCheck? Verification { get; set; }
     public bool RepairChecks { get; set; } = true;
@@ -83,6 +85,33 @@ public sealed partial class MainWindow
     ProjectLibrary? projectLibrary;
     ProjectLibrary Projects => projectLibrary ??= new ProjectLibrary(store.Root);
 
+    void OpenSavedProject(SavedProject entry)
+    {
+        if (busy || sendingRequest || !Directory.Exists(entry.Folder)) return;
+        Projects.Save();
+        Show(NewConversation(entry));
+        RefreshHistory();
+        input.Focus();
+    }
+
+    async Task EditProjectModel(SavedProject entry, Window owner)
+    {
+        var dialog = UtilityWindow("Project model", 510, 240);
+        var choices = ModelChoices(entry.Model, "Use the default model");
+        var selector = new ComboBox { ItemsSource = choices, SelectedItem = choices.First(item => item.Id == (entry.Model ?? "")) };
+        var panel = new StackPanel { Margin = new Thickness(22), Spacing = 10, Children = {
+            EvidenceText("Use this model when opening the saved project."), selector } };
+        var actions = new WrapPanel();
+        actions.Children.Add(Button("Cancel", (_, _) => dialog.Close(false)));
+        actions.Children.Add(Button("Save", (_, _) => dialog.Close(true)));
+        panel.Children.Add(actions);
+        dialog.Content = panel;
+        if (!await dialog.ShowDialog<bool>(owner) || selector.SelectedItem is not LocalModel selected) return;
+        var saved = Projects.Remember(entry.Folder);
+        saved.Model = entry.Model = selected.Id.Length == 0 ? null : selected.Id;
+        Projects.Save();
+    }
+
     void RememberBuildTarget()
     {
         if (!Directory.Exists(current.Project) || WorkspaceScope.IsBroad(current.Project, preferences.Folder)) return;
@@ -126,6 +155,8 @@ public sealed partial class MainWindow
             }
             details.Children.Add(EvidenceText("Source folder · " + entry.Folder));
             details.Children.Add(EvidenceText("Build target · " + (entry.BuildTarget ?? "None selected")));
+            details.Children.Add(Button(entry.Model == null ? "Project model…" : "Project model · " + LocalModel.FromTag(entry.Model).Name,
+                async (_, _) => { await EditProjectModel(entry, dialog); UpdateDetails(); }));
             details.Children.Add(Button(entry.PinnedFiles.Count==0 ? "Instructions and pinned files…" : $"Instructions and pinned files ({entry.PinnedFiles.Count})…",
                 async (_,_)=>{await EditProjectNotes(entry,dialog);UpdateDetails();}));
             details.Children.Add(Button("Focused verification…",async(_,_)=>{await EditFocusedCheck(entry,dialog);UpdateDetails();}));
@@ -189,16 +220,11 @@ public sealed partial class MainWindow
             list.SelectedItem = Projects.Find(current.Project);
             note.Text = "Project saved.";
         });
-        var use = Button("Use project", (_, _) =>
+        var use = Button("Open project", (_, _) =>
         {
             if (list.SelectedItem is not SavedProject entry) return;
-            if(current.BranchFolder!=null){note.Text="This chat is tied to its branch copy. Use a new chat for another project.";return;}
             if (!Directory.Exists(entry.Folder)) { note.Text = "The source folder no longer exists."; return; }
-            project.Text = entry.Folder;
-            CommitProject();
-            current.BuildProject = entry.BuildTarget;
-            mode.SelectedIndex = 1;
-            Save();
+            OpenSavedProject(Projects.Remember(entry.Folder));
             dialog.Close();
         });
         foreach (var b in new[] { save, use }) { b.Margin = new Thickness(0, 0, 8, 0); actions.Children.Add(b); }

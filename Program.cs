@@ -14,7 +14,13 @@ class Program
 }
 public class DeskApp:Application
 {
-    public override void Initialize(){RequestedThemeVariant=ThemeVariant.Dark;var theme=new FluentTheme();theme.Palettes[ThemeVariant.Dark]=new ColorPaletteResources{Accent=Avalonia.Media.Color.Parse("#93BDB2")};Styles.Add(theme);}
+    public override void Initialize()
+    {
+        var theme = new FluentTheme();
+        theme.Palettes[ThemeVariant.Dark] = new ColorPaletteResources { Accent = Avalonia.Media.Color.Parse("#93BDB2") };
+        theme.Palettes[ThemeVariant.Light] = new ColorPaletteResources { Accent = Avalonia.Media.Color.Parse("#27695F") };
+        Styles.Add(theme);
+    }
     public override void OnFrameworkInitializationCompleted()
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
@@ -30,9 +36,10 @@ static class Smoke
     {
         if(args is [_, "--project-benchmark", var benchmarkModel, var benchmarkProject]){await ProjectBenchmark.Run(benchmarkModel,benchmarkProject);return;}
         var root=Path.Combine(AppContext.BaseDirectory,"validation");Directory.CreateDirectory(root);File.WriteAllText(Path.Combine(root,"sample.txt"),"old value");
+        if(args.Contains("--edit-run-checks")){ProjectEvidenceChecks.Run(root);return;}
         var image=args.SkipWhile(x=>x!="--image").Skip(1).FirstOrDefault();
         var model=args.Contains("--large")?LocalModel.Large.Id:LocalModel.Fast.Id;var context=args.Contains("--large")?32768:16384;
-        using var ct=new CancellationTokenSource(TimeSpan.FromMinutes(6));await ModelStorageChecks.Run(root,args.Contains("--storage-check-live"),ct.Token);await DashboardChecks.Run(root,ct.Token);await ContinuityChecks.Run(root,ct.Token);await ProficiencyChecks.Run(root,ct.Token);if(args is [_, "--proficiency-live", var achievement]){await ProficiencyChecks.Live(root,achievement,ct.Token);return;}if(args is [_, "--achievement-edits", var source]){await ProficiencyChecks.AchievementEdits(root,source,ct.Token);return;}await RunUpgradeChecks.Run(root,ct.Token);if(args.Contains("--review-live")){await RunUpgradeChecks.Live(root,ct.Token);return;}ProjectEvidenceChecks.Run(root);WorkspaceUpgradeChecks.Run(root);if(args.Contains("--comparison-check-live")){await WorkspaceUpgradeChecks.Live(root);return;}await ModelChecks.Run(ct.Token);await RecoveryChecks.Run(ct.Token);await ContextChecks.Run(ct.Token);if(args.Contains("--model-check-live")){await ModelChecks.Live(ct.Token);return;}if(args.Contains("--checks-only"))return;var ollama=new OllamaClient();await ollama.Load(model,ct.Token,context);
+        using var ct=new CancellationTokenSource(TimeSpan.FromMinutes(6));await ModelStorageChecks.Run(root,args.Contains("--storage-check-live"),ct.Token);await DashboardChecks.Run(root,ct.Token);await ContinuityChecks.Run(root,ct.Token);await ProficiencyChecks.Run(root,ct.Token);if(args is [_, "--proficiency-live", var achievement]){await ProficiencyChecks.Live(root,achievement,ct.Token);return;}if(args is [_, "--achievement-edits", var source]){await ProficiencyChecks.AchievementEdits(root,source,ct.Token);return;}await RunUpgradeChecks.Run(root,ct.Token);if(args.Contains("--review-live")){await RunUpgradeChecks.Live(root,ct.Token);return;}ProjectEvidenceChecks.Run(root);WorkspaceUpgradeChecks.Run(root);if(args.Contains("--comparison-check-live")){await WorkspaceUpgradeChecks.Live(root);return;}await ModelChecks.Run(ct.Token);await RecoveryChecks.Run(ct.Token);await ContextChecks.Run(ct.Token);if(args.Contains("--model-check-live")){await ModelChecks.Live(ct.Token);return;}Release13Checks.Run(root,ct.Token);if(args.Contains("--checks-only"))return;var ollama=new OllamaClient();await ollama.Load(model,ct.Token,context);
         var chat=new Conversation{Project=root,Mode="agent",Model=model,ContextTokens=context,OutputTokens=2048};var message=new ChatMessage{Text="Describe the colored shapes on the left and right in one sentence. Do not use tools."};if(image!=null)message.Images.Add(image);chat.Messages.Add(message);
         var chatSpeeds=new List<GenerationSpeed>();ollama.Speed+=chatSpeeds.Add;
         var answer=new System.Text.StringBuilder();await ollama.Chat(chat,s=>answer.Append(s),ct.Token);var chatAnswer=answer.ToString();

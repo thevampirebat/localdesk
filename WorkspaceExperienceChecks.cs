@@ -16,7 +16,7 @@ public sealed partial class MainWindow
     {
         var root = Path.Combine(directory, Guid.NewGuid().ToString("N"));
         var data = new ChatStore(root);
-        new DeskSettings { WorkingFolder = root, RunNotifications = false }.Save(root);
+        new DeskSettings { WorkingFolder = root, StartInAgent = agentCheck, RunNotifications = false }.Save(root);
         var model = new WorkspaceCheckModel();
         var window = new MainWindow(true, new OllamaClient(model), data) { ShowInTaskbar = false };
         var report = Path.Combine(directory, agentCheck ? "agent-answer-ui-result.txt" : "workspace-ui-result.txt");
@@ -57,20 +57,51 @@ public sealed partial class MainWindow
                 : result.PauseReason?.Contains("without a visible final answer", StringComparison.Ordinal) == true),
                 "LocalDesk did not report the actual outcome: " + result?.Summary);
         }
+
+        NewChat();
+        backend.AgentRequests.Clear();
+        backend.ProduceFinalAnswer = true;
+        input.Text = "Please add an option to the Firefox extension.";
+        await Send();
+        var edit = current.Messages.Last();
+        Require(!edit.Successful && edit.VerifiedFiles.Count == 0 &&
+            edit.EvidenceNote?.Contains(EditRunOutcome.NoVerifiedChanges, StringComparison.Ordinal) == true,
+            "A finished edit response without verified changes was marked successful: " + status.Text);
     }
 
     async Task CheckWorkspace(WorkspaceCheckModel backend)
     {
+        Require(current.Mode == "chat" && !projectBar.IsVisible && !reviewLatest.IsVisible, "A fresh chat unexpectedly opened Project agent.");
+        var sourceChat = current;
+        var fixture = Projects.Remember(Path.Combine(store.Root, "saved-project"));
+        Directory.CreateDirectory(fixture.Folder);
+        fixture.Model = LocalModel.Large.Id;
+        fixture.Instructions = "Use the existing project conventions.";
+        OpenSavedProject(fixture);
+        Require(current.Project == fixture.Folder && current.Mode == "agent" && current.Model == fixture.Model &&
+            Projects.Find(current.Project)?.Instructions == fixture.Instructions, "Opening a saved project lost its model or instructions.");
+        OpenSample();
+        Require(File.Exists(Path.Combine(current.Project, "README.md")) && current.AcceptanceCheck?.Kind == "Text present" &&
+            input.Text?.Contains("LocalDesk sample completed", StringComparison.Ordinal) == true,
+            "The sample project did not open with a practice task and a check.");
+        Show(sourceChat);
+        preferences.Theme = "Dark";
+        preferences.ChatTextSize = 20;
+        ApplyAppearance();
+        Require(input.FontSize == 20 && ActualThemeVariant == Avalonia.Styling.ThemeVariant.Dark, "Appearance settings did not apply.");
+        preferences.Theme = "Light";
+        ApplyAppearance();
+        Require(ActualThemeVariant == Avalonia.Styling.ThemeVariant.Light, "The light theme did not apply.");
         ShowMiniWindow();
         var monitor=miniWindow??throw new InvalidOperationException("The mini-window did not open.");
         Require(monitor.Update().State==MiniRunState.Idle&&monitor.Topmost&&monitor.Owner==null,"The mini-window is not an independent pinned monitor.");
         SetBusy(true);
-        Require(workingHighlight.IsVisible && workingHighlight.IsIndeterminate, "The activity highlight did not start.");
+        Require(workingHighlight.IsVisible && workingHighlight.IsIndeterminate && runState.Text == "Working", "The activity highlight or run status did not start.");
         SetMiniPhase("Checking fixture");
         Require(monitor.Update() is {State:MiniRunState.Working,Phase:"Checking fixture",Elapsed:not null},"The mini-window lost its active phase or timer.");
         var approval=UtilityWindow("Fixture approval",380,220);
         var approvalReview=ShowRunApproval(approval);
-        Require(monitor.IsVisible&&monitor.Update().State==MiniRunState.Waiting,"The mini-window did not show a waiting approval.");
+        Require(monitor.IsVisible&&monitor.Update().State==MiniRunState.Waiting&&runState.Text=="Needs your approval","The approval state was missing from the workspace or mini-window.");
         OpenMiniDestination(false);
         Require(approval.IsVisible,"The mini-window lost the approval dialog.");
         approval.Close(false);

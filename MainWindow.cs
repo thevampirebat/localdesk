@@ -11,7 +11,7 @@ using System.Text;
 namespace LocalDesk;
 public sealed partial class MainWindow:Window
 {
-    static IBrush Brush(string hex)=>SolidColorBrush.Parse(hex);
+    static IBrush Brush(string hex)=>DeskPalette.Get(hex);
     readonly ChatStore store;readonly OllamaClient ollama;readonly AgentClient agent=new();
     readonly ListBox history=new(){Background=Brush("#11151C"),BorderThickness=new Thickness(0),MinHeight=100};
     readonly StackPanel messages=new(){Spacing=24,MaxWidth=880,Margin=new Thickness(28,28,28,20)};
@@ -33,6 +33,8 @@ public sealed partial class MainWindow:Window
     readonly StackPanel activity=new(){Spacing=12,Margin=new Thickness(18)};
     readonly ScrollViewer activityScroll=new(){VerticalScrollBarVisibility=Avalonia.Controls.Primitives.ScrollBarVisibility.Auto};
     readonly Grid workspace=new(){ColumnDefinitions=new ColumnDefinitions("*,6,300")};
+    readonly TextBlock runState = new() { FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+    Button reviewLatest = null!;
     readonly WrapPanel attachments=new(){Orientation=Orientation.Horizontal};readonly List<string> pendingImages=[];readonly List<FileAttachment> pendingFiles=[];int summaryOffset;
     readonly Button tokenSettings=Button("Profile",null);
     readonly Button send=Button("↑",null,"#B8D6CF");readonly Button stop=Button("■ Stop",null);
@@ -50,6 +52,11 @@ public sealed partial class MainWindow:Window
         ollama = client;
         store = chatStore;
         preferences=DeskSettings.Load(store.Root);
+        if (OllamaClient.TryOrigin(preferences.ServerOrigin, out var origin))
+            ollama.UseOrigin(origin, preferences.CompatibleServer);
+        ApplyAppearance();
+        ActualThemeVariantChanged += (_, _) => DeskPalette.Apply(ActualThemeVariant);
+        ollama.MemoryBudget = new(preferences.ModelRamGiB, preferences.ModelVramGiB);
         InitializeSession();
         paintReply.Tick += (_, _) =>
         {
@@ -74,6 +81,7 @@ public sealed partial class MainWindow:Window
         ToolTip.SetTip(newChat, "New chat · Ctrl+N");
         var topActions = new StackPanel { Spacing = 4, Margin = new Thickness(0, 0, 0, 14) };
         topActions.Children.Add(newChat);
+        topActions.Children.Add(WorkspaceNav("Open a project…", async (_, _) => await OpenProjectFolder()));
         var commands = WorkspaceNav("Quick actions     Ctrl+K", async (_, _) => await ShowCommands());
         topActions.Children.Add(commands);
         topActions.Children.Add(WorkspaceNav("Browse history", async (_, _) => await BrowseHistory()));
@@ -129,23 +137,44 @@ public sealed partial class MainWindow:Window
         
         AddRecoveryPanel(compose);
         var box=new StackPanel{Spacing=6,Margin=new Thickness(12)};box.Children.Add(attachments);box.Children.Add(input);
-        var controls=new Grid{ColumnDefinitions=new ColumnDefinitions("Auto,Auto,*,Auto,Auto")};var attach=Button("＋  File",async(_,_)=>await Attach());controls.Children.Add(attach);tokenSettings.Margin=new Thickness(8,0,0,0);tokenSettings.Click+=async(_,_)=>await ConfigureTokens();Grid.SetColumn(tokenSettings,1);controls.Children.Add(tokenSettings);limit.FontSize=11;limit.MinHeight=30;limit.Margin=new Thickness(0,0,8,0);Grid.SetColumn(limit,3);controls.Children.Add(limit);send.Width=42;send.Height=36;send.Foreground=Brush("#14231C");send.FontSize=22;send.Click+=async(_,_)=>await Send();Grid.SetColumn(send,4);controls.Children.Add(send);stop.IsVisible=false;stop.Margin=new Thickness(8,0,0,0);stop.Click+=(_,_)=>Stop();Grid.SetColumn(stop,4);controls.Children.Add(stop);box.Children.Add(controls);
+        var controls=new Grid{ColumnDefinitions=new ColumnDefinitions("Auto,*,Auto")};
+        dictateButton = Button("Dictate", (_, _) => ToggleDictation());
+        controls.Children.Add(new WrapPanel { Children = { Button("＋  File",async(_,_)=>await Attach()), dictateButton } });
+        send.Width=42;send.Height=36;send.Foreground=Brush("#14231C");send.FontSize=22;send.Click+=async(_,_)=>await Send();
+        Grid.SetColumn(send,2);controls.Children.Add(send);
+        stop.IsVisible=false;stop.Margin=new Thickness(8,0,0,0);stop.Click+=(_,_)=>Stop();
+        Grid.SetColumn(stop,2);controls.Children.Add(stop);box.Children.Add(controls);
         queueDraft = Button("Queue", (_, _) => EnqueueDraft());
         queueDraft.Margin = new Thickness(8, 0);
         queueDraft.HorizontalAlignment = HorizontalAlignment.Right;
         ToolTip.SetTip(queueDraft, "Save this draft as a separate job with the current project and model.");
-        Grid.SetColumn(queueDraft, 2);
+        Grid.SetColumn(queueDraft, 1);
         controls.Children.Add(queueDraft);
         var dropZone=new Border{Background=Brush("#212A36"),CornerRadius=new CornerRadius(18),BorderBrush=Brush("#3A4858"),BorderThickness=new Thickness(1),Child=box};compose.Children.Add(dropZone);
         DragDrop.SetAllowDrop(this,true);DragDrop.AddDragOverHandler(this,(_,e)=>{e.DragEffects=CanEditDraft&&e.DataTransfer.Contains(DataFormat.File)?DragDropEffects.Copy:DragDropEffects.None;e.Handled=true;});DragDrop.AddDropHandler(this,(_,e)=>{if(!CanEditDraft)return;var files=e.DataTransfer.TryGetFiles();if(files!=null)ImportFiles(files.OfType<IStorageFile>().Select(f=>f.Path.LocalPath));e.Handled=true;});
         ToolTip.SetTip(dropZone,"Drop images, text, source code or other files here");
-        var footer=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto")};footer.Children.Add(status);Grid.SetColumn(speed,1);footer.Children.Add(speed);compose.Children.Add(footer);
+        var footer=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto")};
+        var runSummary = new StackPanel { Spacing = 4, Children = { runState, status } };
+        footer.Children.Add(runSummary);
+        reviewLatest = Button("Review changes and checks", async (_, _) =>
+        {
+            if (LatestProjectResult() is { } result) await ReviewResults(result);
+        });
+        var footerActions = new StackPanel { Spacing = 5, Children = { speed, reviewLatest } };
+        Grid.SetColumn(footerActions,1);footer.Children.Add(footerActions);compose.Children.Add(footer);
         compose.Children.Add(workingHighlight);
         ollama.Speed+=UpdateSpeed;
         ollama.Inference+=timing=>runCollector?.Inference(timing);
         agent.ToolFinished+=seconds=>runCollector?.Tool(seconds);
         agent.ToolCheckpoint+=SaveToolCheckpoint;
-        var contextRow=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto,Auto")};var meter=new StackPanel();meter.Children.Add(contextUsed);meter.Children.Add(contextBar);contextRow.Children.Add(meter);Grid.SetColumn(compactButton,1);contextRow.Children.Add(compactButton);var memoryButton=Button("Memory",(_,_)=>ShowMemory());memoryButton.Margin=new Thickness(8,0,0,0);Grid.SetColumn(memoryButton,2);contextRow.Children.Add(memoryButton);compose.Children.Insert(compose.Children.Count-1,contextRow);compactButton.Click+=async(_,_)=>await CompactContext();ToolTip.SetTip(compactButton,"Summarize older context without deleting the visible chat or project files.");
+        var meter = new StackPanel { Children = { contextUsed, contextBar } };
+        var memoryButton = Button("Memory", (_, _) => ShowMemory());
+        var advancedActions = new WrapPanel { Children = { tokenSettings, limit, compactButton, memoryButton } };
+        tokenSettings.Click += async (_, _) => await ConfigureTokens();
+        compactButton.Click += async (_, _) => await CompactContext();
+        ToolTip.SetTip(compactButton,"Summarize older context without deleting the visible chat or project files.");
+        var advanced = new StackPanel { Spacing = 8, Children = { meter, advancedActions } };
+        compose.Children.Insert(compose.Children.Count-1, new Expander { Header = "Run settings and context", Content = advanced });
         ollama.ContextUsed+=UpdateContext;ollama.Status+=text=>Dispatcher.UIThread.Post(()=>{status.Text=text;AddActivity("compaction",text);});
         KeyDown+=async(_,e)=>
         {
@@ -160,6 +189,16 @@ public sealed partial class MainWindow:Window
         model.SelectionChanged+=async(_,_)=>{if(changing||busy)return;await SwitchModel(SelectedModel.Id);};
         limit.SelectionChanged+=async(_,_)=>{if(changing||busy||limit.SelectedItem is not TimeOption option)return;if(option.Minutes<0)await ConfigureTimeLimit();else{current.TimeLimitMinutes=option.Minutes;Save();}};
         project.LostFocus+=(_,_)=>CommitProject();
+        project.KeyDown += (_, e) =>
+        {
+            if (e.Key != Key.Enter) return;
+            e.Handled = true;
+            var path = FolderText(project.Text);
+            if (!Path.IsPathFullyQualified(path) || !Directory.Exists(path)) { status.Text = "Enter the full path to an existing folder."; return; }
+            CommitProject();
+            status.Text = "Project folder set to " + current.Project;
+            input.Focus();
+        };
         agent.Update+=(kind,text)=>Dispatcher.UIThread.Post(()=>{if(kind=="text")Append(text);else{if(kind=="tool"){summaryOffset=activeMessage?.Text.Length??0;SetMiniPhase("Running a tool");}AddActivity(kind,text);status.Text=kind=="tool"?"Working… see Activity":text;}});
         Opened+=async(_,_)=>
         {
@@ -167,8 +206,7 @@ public sealed partial class MainWindow:Window
             RestoreSession();
             if(preview){connection.Text="●  Layout preview";return;}
             await RefreshModels();
-            if(preferences.LoadModelAtStartup)await LoadModel();
-            else connection.Text="●  Ready · model on demand";
+            if(preferences.LoadModelAtStartup && installedModels.Any(item => item.Id == current.Model)) await LoadModel();
         };
         Closing+=(_,e)=>
         {
@@ -179,6 +217,7 @@ public sealed partial class MainWindow:Window
                 cancellation?.Cancel();agent.Dispose();status.Text="Saving the unfinished run…";return;
             }
             draftTimer.Stop(); quietRunTimer.Stop(); paintReply.Stop(); notifications?.Dispose(); miniWindow?.Close();
+            EndDictation(); DisposeSpeaker();
             cancellation?.Cancel();agent.Dispose();bridge?.Dispose();PersistWorkspace(includeChats: true);
         };
     }
@@ -208,8 +247,9 @@ public sealed partial class MainWindow:Window
 
     async Task CompactContext(bool preview)
     {
+        if (ollama.Compatible) { status.Text = "Local compaction is available with an Ollama connection."; return; }
         if(busy)return;if(current.Messages.Count==0){status.Text="There is no conversation to compact yet.";return;}
-        if(loadedModel!=ModelKey){await LoadModel();if(loadedModel!=ModelKey)return;}
+        if(loadedModel!=ModelKey || ollama.MemoryBudget.Enabled){await LoadModel();if(loadedModel!=ModelKey)return;}
         using var cts=new CancellationTokenSource(TimeSpan.FromMinutes(4));cancellation=cts;SetBusy(true);SetMiniPhase("Compacting context");manuallyStopped=false;agent.Dispose();status.Text="Compacting context…";AddActivity("compaction","Manual compaction started. Visible history will be kept.");
         try
         {
@@ -246,7 +286,7 @@ public sealed partial class MainWindow:Window
     }
     void CommitProject()
     {
-        var path=current.BranchFolder??(string.IsNullOrWhiteSpace(project.Text)?preferences.Folder:project.Text.Trim());project.Text=path;
+        var path=current.BranchFolder??FolderText(project.Text);project.Text=path;
         if(!string.Equals(current.Project.TrimEnd('\\','/'),path.TrimEnd('\\','/'),StringComparison.OrdinalIgnoreCase))
         {
             current.AgentSession=null;
@@ -278,7 +318,23 @@ public sealed partial class MainWindow:Window
     {
         var b=new Button{Content=text,CornerRadius=new CornerRadius(9),Padding=new Thickness(12,8),Background=Brush(bg??"#242824"),BorderBrush=Brush("#384553"),BorderThickness=new Thickness(bg==null?1:0)};if(click!=null)b.Click+=click;return b;
     }
-    Conversation NewConversation(){var chat=new Conversation{Mode=preferences.StartInAgent?"agent":"chat",Project=preferences.Folder};if(preferences.Profiles.TryGetValue(chat.Model,out var profile)){chat.ContextTokens=profile.Context;chat.OutputTokens=profile.Output;chat.Thinking=profile.Thinking;}store.Chats.Add(chat);store.Save();return chat;}
+    Conversation NewConversation(SavedProject? entry = null)
+    {
+        var chat = new Conversation
+        {
+            Mode = entry != null || preferences.StartInAgent ? "agent" : "chat",
+            Project = entry?.Folder ?? (preferences.StartInAgent ? preferences.Folder : ""),
+            BuildProject = entry?.BuildTarget,
+            Model = entry?.Model ?? preferences.DefaultModel ?? installedModels.FirstOrDefault()?.Id ?? LocalModel.Fast.Id
+        };
+        var profile = ProfileFor(chat.Model);
+        chat.ContextTokens = profile.Context;
+        chat.OutputTokens = profile.Output;
+        chat.Thinking = profile.Thinking;
+        store.Chats.Add(chat);
+        store.Save();
+        return chat;
+    }
     void NewChat(){if(busy)return;Show(NewConversation());RefreshHistory();}
     void UpdateSpeed(GenerationSpeed value)=>Dispatcher.UIThread.Post(()=>
     {
@@ -292,8 +348,9 @@ public sealed partial class MainWindow:Window
         {
             try{var root=Path.GetFullPath(Path.Combine(store.Root,"cline","sessions"));var path=Path.GetFullPath(Path.Combine(root,chat.AgentSession,chat.AgentSession+".messages.json"));if(path.StartsWith(root+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase)&&File.Exists(path)){var records=System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))?["messages"]?.AsArray();var metrics=records?.LastOrDefault(m=>m?["metrics"]?["inputTokens"]!=null)?["metrics"];if(metrics!=null){chat.LastContextUsed=(metrics["inputTokens"]?.GetValue<int>()??0)+(metrics["outputTokens"]?.GetValue<int>()??0);chat.ContextUsageEstimated=true;}}}catch{}
         }
-        changing=true;current=chat;speed.Text="— tok/s";title.Text=chat.Title;if(!availableModels.Any(m=>m.Id==chat.Model))availableModels.Add(LocalModel.FromTag(chat.Model));model.ItemsSource=availableModels.ToList();model.SelectedItem=availableModels.First(m=>m.Id==chat.Model);ToolTip.SetTip(model,SelectedModel.Note);mode.SelectedIndex=chat.Mode=="agent"?1:0;projectBar.IsVisible=chat.Mode=="agent";project.Text=string.IsNullOrWhiteSpace(chat.Project)?preferences.Folder:chat.Project;pendingImages.Clear();pendingFiles.Clear();attachments.Children.Clear();RestoreDraft();messages.Children.Clear();messageCards.Clear();activeMessage=null;streaming=null;activity.Children.Clear();foreach(var entry in chat.Activity)RenderActivity(entry);if(chat.Activity.Count==0)activity.Children.Add(new TextBlock{Text="Tool calls, file changes and checks will appear here.",FontSize=13,TextWrapping=TextWrapping.Wrap,Foreground=Brush("#84958A")});
-        if(chat.Messages.Count==0){var welcome=new StackPanel{Spacing=14,Margin=new Thickness(8,80,0,70)};welcome.Children.Add(new TextBlock{Text="What would you like to work on?",FontSize=36,FontWeight=FontWeight.SemiBold,TextWrapping=TextWrapping.Wrap});welcome.Children.Add(new TextBlock{Text="Describe a task or drop a file to get started.",FontSize=15,Foreground=Brush("#9FA9A2"),TextWrapping=TextWrapping.Wrap});messages.Children.Add(welcome);}else foreach(var m in chat.Messages)AddMessage(m);
+        changing=true;current=chat;speed.Text="— tok/s";title.Text=chat.Title;if(!availableModels.Any(m=>m.Id==chat.Model))availableModels.Add(LocalModel.FromTag(chat.Model));model.ItemsSource=availableModels.ToList();model.SelectedItem=availableModels.First(m=>m.Id==chat.Model);ToolTip.SetTip(model,SelectedModel.Note);mode.SelectedIndex=chat.Mode=="agent"?1:0;projectBar.IsVisible=chat.Mode=="agent";project.Text=chat.Project;pendingImages.Clear();pendingFiles.Clear();attachments.Children.Clear();RestoreDraft();messages.Children.Clear();messageCards.Clear();activeMessage=null;streaming=null;activity.Children.Clear();foreach(var entry in chat.Activity)RenderActivity(entry);if(chat.Activity.Count==0)activity.Children.Add(new TextBlock{Text="Tool calls, file changes and checks will appear here.",FontSize=13,TextWrapping=TextWrapping.Wrap,Foreground=Brush("#84958A")});
+        if(chat.Messages.Count==0)RenderWelcome();else foreach(var m in chat.Messages)AddMessage(m);
+        UpdateRunState();
         project.IsEnabled=!busy&&chat.BranchFolder==null;UpdateWebSearchPermission();history.SelectedItem=chat;UpdatePin();RefreshTimeLimit();changing=false;ShowRecovery();UpdateContext(new(chat.LastContextUsed,chat.ContextTokens,chat.ContextUsageEstimated,chat.ContextNotesOnly));FollowLatest();PersistWorkspace(includeChats: draftTimer.IsEnabled);Dispatcher.UIThread.Post(()=>activityScroll.ScrollToEnd(),DispatcherPriority.Background);
     }
     void UpdateWebSearchPermission()
@@ -325,9 +382,10 @@ public sealed partial class MainWindow:Window
     {
         var body=new StackPanel{Spacing=7};body.Children.Add(new TextBlock{Text=message.Successful?"✓  RESULT":"!  TASK INCOMPLETE",FontSize=12,FontWeight=FontWeight.Bold,Foreground=Brush(message.Successful?"#A8E6BC":"#E8C585")});
         var text=message.Summary??"";
+        if (text.Length > 0) body.Children.Add(Button("Read aloud", (_, _) => ReadAloud(text)));
         var preview=SummaryPreview.Create(text);
-        body.Children.Add(RenderMarkdown(preview,14));
-        if(preview!=text)body.Children.Add(new Expander{Header="Full summary",Content=RenderMarkdown(text,13)});
+        body.Children.Add(RenderMarkdown(preview,ChatTextSize));
+        if(preview!=text)body.Children.Add(new Expander{Header="Full summary",Content=RenderMarkdown(text,ChatTextSize)});
         if(message.ProjectUsed!=null)body.Children.Add(EvidenceText($"{message.VerifiedFiles.Count} verified file change{(message.VerifiedFiles.Count == 1 ? "" : "s")} · {CheckOutcome(message)}"));
         if(message.ProjectUsed!=null || message.Artifacts.Count>0)body.Children.Add(Button("Review results",async(_,_)=>await ReviewResults(message)));
         AddEvidence(body, message);
@@ -352,7 +410,8 @@ public sealed partial class MainWindow:Window
         reply.Summary=reply.Text[reply.SummaryOffset..].Trim();if(reply.Summary.Length==0)reply.Summary="No final summary was returned. Review Activity for details.";
         reply.Successful=successful;reply.Artifacts=Artifacts.Find(reply.Text,current.Project,reply.VerifiedFiles.Select(f=>f.Path));if(messages.Children.Count>0)messages.Children.RemoveAt(messages.Children.Count-1);
         AddMessage(reply);
-        AddActivity(successful?"finished":"incomplete",successful?"Response finished. Review the summary in Chat.":"The request stopped before completion. Any changes already made remain on disk.");Scroll();
+        AddActivity(successful?"finished":"incomplete",successful?"Response finished. Review the summary in Chat.":
+            reply.PauseReason??reply.EvidenceNote??"The request stopped before completion. Any changes already made remain on disk.");Scroll();
     }
     static void RevealFile(string path)
     {
@@ -382,9 +441,9 @@ public sealed partial class MainWindow:Window
         }
         foreach(var file in message.Files)body.Children.Add(AttachmentLink(file));
         var text=message.Summary==null?message.Text:message.Text[..Math.Clamp(message.SummaryOffset,0,message.Text.Length)].Trim();
-        var live=message.Role=="assistant"&&message.Summary==null?ChatText(text,16):null;
-        if(message.Summary!=null&&!string.IsNullOrWhiteSpace(text))body.Children.Add(new Expander{Header="Response details",Content=RenderMarkdown(text)});
-        else if(live!=null || text.Length>0)body.Children.Add(live is not null?live:RenderMarkdown(text));
+        var live=message.Role=="assistant"&&message.Summary==null?ChatText(text,ChatTextSize):null;
+        if(message.Summary!=null&&!string.IsNullOrWhiteSpace(text))body.Children.Add(new Expander{Header="Response details",Content=RenderMarkdown(text,ChatTextSize)});
+        else if(live!=null || text.Length>0)body.Children.Add(live is not null?live:RenderMarkdown(text,ChatTextSize));
         if(message.Summary!=null)body.Children.Add(SummaryCard(message));
         var border=new Border{Child=body,CornerRadius=new CornerRadius(14),Padding=new Thickness(18),Background=message.Role=="user"?Brush("#273744"):Brush("#181E27")};messages.Children.Add(border);
         messageCards[message.Marker]=border;
@@ -402,6 +461,7 @@ public sealed partial class MainWindow:Window
     {
         if (value && !busy && !sendingRequest) StartMiniClock();
         busy = value;
+        UpdateRunState();
         if (value && requestStreaming) paintReply.Start();
         else paintReply.Stop();
         workingHighlight.IsIndeterminate = workingHighlight.IsVisible = value;
@@ -418,13 +478,33 @@ public sealed partial class MainWindow:Window
             ScheduleQueue();
         }
     }
+    ChatMessage? LatestProjectResult() => current.Messages.LastOrDefault(message => message.ProjectUsed != null && message.Summary != null);
+
+    void UpdateRunState()
+    {
+        var result = LatestProjectResult();
+        runState.Text = approvalWindow != null ? "Needs your approval" : busy ? "Working"
+            : result == null ? "" : result.Successful ? "Ready to review" : "Run needs attention";
+        runState.IsVisible = runState.Text.Length > 0;
+        reviewLatest.IsVisible = !busy && result != null;
+    }
+
     async Task LoadModel()
     {
-        if(busy)return;SetBusy(true);using var cts=new CancellationTokenSource(TimeSpan.FromMinutes(4));cancellation=cts;
+        if(busy)return;
+        var canReuse = ollama.MemoryBudget.Enabled && loadedModel == ModelKey;
+        loadedModel=null;SetBusy(true);using var cts=new CancellationTokenSource(TimeSpan.FromMinutes(4));cancellation=cts;
         SetMiniPhase("Loading model");
         speed.Text="— tok/s";status.Text="Loading "+SelectedModel.Name+"…";connection.Text="●  Loading model";
-        try{await ollama.Load(SelectedModel.Id,cts.Token,current.ContextTokens);loadedModel=ModelKey;connection.Text="●  Local model ready";status.Text=$"{current.ContextTokens:N0} context · {current.OutputTokens:N0} max output · Thinking {(current.Thinking?"when supported":"off")}";UpdateContext(new(current.LastContextUsed,current.ContextTokens,current.ContextUsageEstimated,current.ContextNotesOnly));}
+        try
+        {
+            if (!canReuse || !await ollama.EnforceMemoryBudget(current.Model, cts.Token, allowUnloaded: true))
+                await ollama.Load(current.Model, cts.Token, current.ContextTokens);
+            loadedModel=ModelKey;connection.Text="●  " + ollama.Http.BaseAddress!.Authority;status.Text=$"{current.ContextTokens:N0} context · {current.OutputTokens:N0} max output · Thinking {(current.Thinking?"when supported":"off")}";
+            UpdateContext(new(current.LastContextUsed,current.ContextTokens,current.ContextUsageEstimated,current.ContextNotesOnly));
+        }
         catch(OperationCanceledException){status.Text="Model loading stopped.";connection.Text="●  Stopped";}
+        catch(ModelMemoryBudgetException e){status.Text=e.Message;connection.Text="●  Memory budget reached";}
         catch(Exception e){status.Text=e.Message;connection.Text="●  Not connected";}
         finally{cancellation=null;SetBusy(false);}
     }
@@ -432,6 +512,8 @@ public sealed partial class MainWindow:Window
     async Task Send(ChatMessage? resume = null, ChatMessage? paused = null, RunCheckpoint? priorCheckpoint = null, ModelHandoff? handoff = null)
     {
         if (sendingRequest || busy || closingWorkspace || session.Pending.Contains(current.Id)) return;
+        if (dictation != null)
+        { status.Text = "Stop dictation and review the draft before sending."; return; }
         sendingRequest = true;
         StartMiniClock();
         try { await SendCore(resume, paused, priorCheckpoint, handoff); }
@@ -447,8 +529,10 @@ public sealed partial class MainWindow:Window
             return;
         }
         CommitProject();
-        if(current.Mode=="agent"&&!Directory.Exists(current.Project)){status.Text="The working folder does not exist. Choose a folder or change the default in Settings.";return;}
-        if(loadedModel!=ModelKey){var loadWatch=System.Diagnostics.Stopwatch.StartNew();await LoadModel();loadSeconds=loadWatch.Elapsed.TotalSeconds;if(closingWorkspace||loadedModel!=ModelKey)return;}
+        if (ollama.Compatible && current.Mode == "agent")
+        { status.Text = "This OpenAI-compatible connection supports Chat. Choose an Ollama connection for Project agent."; return; }
+        if(current.Mode=="agent"&&!Directory.Exists(current.Project)){status.Text="Choose a project folder to use Project agent.";return;}
+        if(loadedModel!=ModelKey || ollama.MemoryBudget.Enabled){var loadWatch=System.Diagnostics.Stopwatch.StartNew();await LoadModel();loadSeconds=loadWatch.Elapsed.TotalSeconds;if(closingWorkspace||loadedModel!=ModelKey)return;}
         using var capabilityCheck=new CancellationTokenSource(TimeSpan.FromSeconds(8));
         SetBusy(true);
         SetMiniPhase("Checking model capabilities");
@@ -488,6 +572,10 @@ public sealed partial class MainWindow:Window
         SetMiniPhase(current.Mode=="agent"?"Preparing project":"Generating response");
         speed.Text="— tok/s · waiting";var watch=System.Diagnostics.Stopwatch.StartNew();
         ProjectEvidence? evidence = null;
+        bool expectsChanges = current.Mode == "agent" && EditRunOutcome.ExpectsChanges(user.Text,
+            current.Messages.SkipLast(2).LastOrDefault(m => m.Role == "assistant") is { ProjectUsed: not null } previousReply &&
+            (previousReply.VerifiedFiles.Count > 0 || previousReply.ExpectedEdits));
+        reply.ExpectedEdits = expectsChanges;
         bool successful = false, settled = false;
         RunCheckpoint? checkpoint = null;
         double preparation=0,verify=0,buildSeconds=0;
@@ -519,6 +607,8 @@ public sealed partial class MainWindow:Window
                 projectBridge.Window.Chat=current;
                 projectBridge.Window.ReduceDuplicateReads=preferences.ReduceDuplicateReads;
                 var task = "Active user request (verbatim):\n" + user.Text;
+                const string editGuidance = "Trace the reported behavior in the exact screen and event handler the user describes. When a prior fix failed, inspect that change and test the failing path. Make the smallest relevant edit. Preserve file encoding and keep temporary inspection files outside the project. If you can only check source or syntax, state that the interaction still needs a runtime test.";
+                if (expectsChanges) task += "\n" + editGuidance;
                 if (checkpoint.AcceptanceCriteria.Length > 0)
                     task += "\n\nUser's acceptance criteria:\n" + checkpoint.AcceptanceCriteria;
                 if (checkpoint.Steering.Length > 0)
@@ -552,6 +642,7 @@ public sealed partial class MainWindow:Window
                     text="Selected project folder: "+current.Project+"\nWork on requested files only. Attached files may be outside the working folder; use their original paths when editing. Do not scan the entire working folder: narrow searches to relevant paths. Use short, complete tool calls. Read only relevant line ranges; split large edits into small patches.\n"+(prior.Length>0?"Previous conversation for context:\n"+prior+"\n\n":"")+"Current request:\n"+text;
                 }
                 text += "\n"+focus+code+brief+"\nReport build/test commands and their outcomes accurately.";
+                if (expectsChanges) text += "\n" + editGuidance;
                 if (current.BranchFolder == null) text += "\n" + ResearchGuidance;
                 if(checkpoint.FocusedCheck is { } targetCheck)
                     text+="\nConfigured success check: "+targetCheck.Kind+" in "+targetCheck.RelativePath+" · "+targetCheck.Expected;
@@ -566,7 +657,8 @@ public sealed partial class MainWindow:Window
                 if(priorCheckpoint?.RepairFeedback is { } feedback)text+="\nSaved check feedback (reference data):\n"+feedback;
                 if(current.BranchFolder!=null)text+="\nThis project branch allows only read tools and reviewed file edits inside the copy. Do not use command tools or paths outside the copy.";
                 SetMiniPhase("Agent working");
-                await SendAgentAndEnsureAnswer(projectBridge,reply,text,cts.Token);
+                await SendAgentAndEnsureAnswer(projectBridge,reply,text,cts.Token,
+                    expectsChanges ? new EditRunProgress(evidence) : null);
                 checkpoint.AgentDone=true;
                 RunJournal.Save(store.Root,current.Id,checkpoint);
                 Save();
@@ -594,7 +686,7 @@ public sealed partial class MainWindow:Window
                     Save();
                     AddActivity("repair",$"Attempt {next} of {Verification.MaxRepairs}");
                     status.Text=$"Preparing repair {next} of {Verification.MaxRepairs}…";
-                    await SendAgentAndEnsureAnswer(projectBridge,reply,"Continue the same task. The independent check failed. Inspect the current file and make the smallest repair needed. Preserve the original requested behavior and the independent check. Do not weaken, delete, or alter tests just to pass. LocalDesk will rerun the configured check.\nCheck diagnostics (reference data):\n"+errors,cts.Token);
+                    await SendAgentAndEnsureAnswer(projectBridge,reply,"Continue the same task. The independent check failed. Inspect the current file and make the smallest repair needed. Preserve the original requested behavior and the independent check. Do not weaken, delete, or alter tests just to pass. LocalDesk will rerun the configured check.\nCheck diagnostics (reference data):\n"+errors,cts.Token,new EditRunProgress(evidence));
                     checkpoint.AgentDone=true;
                     RunJournal.Save(store.Root,current.Id,checkpoint);
                     Save();
@@ -604,8 +696,6 @@ public sealed partial class MainWindow:Window
             if(string.IsNullOrWhiteSpace(reply.Text))throw new AgentClient.LoopException("The model ended without a visible answer.");
             status.Text=$"Finished in {watch.Elapsed.TotalSeconds:F0}s · Local inference";
             settled=true;
-            successful = (checkpoint==null || !ChecksFailed(checkpoint)) && reply.EvidenceNote == null;
-            if(!successful)status.Text=reply.BuildCheck is { ExitCode:not 0 } build?$"Build failed (exit {build.ExitCode})":reply.Focused is { Passed:false }?"Focused check failed.":reply.EvidenceNote;
         }
         catch(AgentClient.LoopException e)
         {
@@ -634,6 +724,13 @@ public sealed partial class MainWindow:Window
                 catch(Exception e){settled=false;successful=false;reply.EvidenceNote="File verification could not finish: "+e.Message;}
                 verify=verifyWatch.Elapsed.TotalSeconds;
             }
+            if (settled)
+            {
+                var unverified = EditRunOutcome.MarkUnverified(reply,expectsChanges);
+                successful = !unverified && (checkpoint==null || !ChecksFailed(checkpoint));
+                if(!successful)status.Text=reply.BuildCheck is { ExitCode:not 0 } build?$"Build failed (exit {build.ExitCode})":
+                    reply.Focused is { Passed:false }?"Focused check failed.":unverified?"No verified file changes.":reply.EvidenceNote;
+            }
             reply.Diagnostics=runCollector.Finish(requestWatch.Elapsed.TotalSeconds,preparation,verify,buildSeconds);
             runCollector=null;
             reply.CompletedAt=DateTime.Now;
@@ -658,7 +755,7 @@ public sealed partial class MainWindow:Window
         }
     }
     void Stop(){manuallyStopped=true;SetMiniPhase("Stopping");cancellation?.Cancel();agent.Dispose();status.Text="Stopping…";}
-    async Task Browse(){if(busy)return;if(current.BranchFolder!=null){status.Text="This branch uses its project copy.";return;}var picked=await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions{Title="Choose a project folder",AllowMultiple=false});if(picked.Count>0){project.Text=picked[0].Path.LocalPath;CommitProject();}}
+    async Task Browse(){if(busy)return;if(current.BranchFolder!=null){status.Text="This branch uses its project copy.";return;}if(await PickProjectPath(current.Project) is { } folder){project.Text=folder;CommitProject();}}
     async Task Attach()
     {
         if(!CanEditDraft)return;var chat=current;var picked=await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions{Title="Attach files",AllowMultiple=true});if(current==chat)ImportFiles(picked.Select(item=>item.Path.LocalPath));

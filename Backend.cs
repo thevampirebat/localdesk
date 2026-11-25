@@ -7,20 +7,22 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace LocalDesk;
-public sealed class OllamaClient
+public sealed partial class OllamaClient
 {
     public static string RuntimeModel(string model)=>model==LocalModel.Fast.Id?"localdesk-qwen35-9b:current":model==LocalModel.Large.Id?"localdesk-qwen36-35b:current":"localdesk-custom-"+Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(model))).ToLowerInvariant()[..16]+":current";
     public event Action<GenerationSpeed>? Speed;
     public event Action<InferenceTiming>? Inference;
     public event Action<ContextUsage>? ContextUsed;
     public event Action<string>? Status;
-    public readonly HttpClient Http;
+    public HttpClient Http { get; private set; }
+    internal ModelMemoryBudget MemoryBudget { get; set; } = new(0, 0);
     public OllamaClient(HttpMessageHandler? handler=null){Http=handler==null?new HttpClient():new HttpClient(handler);Http.BaseAddress=new Uri("http://127.0.0.1:11434");Http.Timeout=Timeout.InfiniteTimeSpan;}
     private readonly ConcurrentDictionary<string,(DateTime Expires, HashSet<string> Values)> capabilityCache = new();
     public void ClearCapabilities() => capabilityCache.Clear();
 
     public async Task<IReadOnlySet<string>> Capabilities(string model, CancellationToken ct)
     {
+        if (Compatible) return new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "chat" };
         if (capabilityCache.TryGetValue(model, out var cached) && cached.Expires > DateTime.UtcNow)
             return cached.Values;
         using var response = await Post("/api/show", new { model }, ct);
@@ -67,6 +69,12 @@ public sealed class OllamaClient
 
     public async Task Connect(CancellationToken ct)
     {
+        if (Compatible || !Http.BaseAddress!.Equals(DefaultOrigin))
+        {
+            using var remote = await Http.GetAsync(ModelListPath, ct);
+            remote.EnsureSuccessStatusCode();
+            return;
+        }
         try{using var r=await Http.GetAsync("/api/tags",ct);r.EnsureSuccessStatusCode();return;}catch(HttpRequestException){}
         if (ownedServer == null || ownedServer.HasExited)
         {
@@ -79,6 +87,11 @@ public sealed class OllamaClient
     public async Task Load(string model,CancellationToken ct,int contextTokens=32768)
     {
         await Connect(ct);
+        if (Compatible)
+        {
+            if (MemoryBudget.Enabled) throw new ModelMemoryBudgetException("This connection does not report memory. Set both budgets to zero to use it.");
+            return;
+        }
         var runtime=RuntimeModel(model);
         using(var existing=await Post("/api/show",new{model=runtime},ct))
         {
@@ -90,24 +103,33 @@ public sealed class OllamaClient
             }
         }
         using(var create=await Post("/api/create",new{model=runtime,from=model,stream=false,parameters=new{num_ctx=contextTokens}},ct))await Check(create,ct);
-        using(var ps=await Http.GetAsync("/api/ps",ct))
-        {
-            var state=JsonNode.Parse(await ps.Content.ReadAsStringAsync(ct));
-            foreach(var entry in state?["models"]?.AsArray()??[])
-            {
-                var name=entry?["name"]?.GetValue<string>();
-                if(name!=null&&name!=runtime){using var unload=await Post("/api/generate",new{model=name,keep_alive=0},ct);unload.EnsureSuccessStatusCode();}
-            }
-        }
         using var load=await Post("/api/generate",new{model=runtime,keep_alive="10m",options=new{num_ctx=contextTokens}},ct);
         await Check(load,ct);
+        await EnforceMemoryBudget(model, ct);
+    }
+
+    internal async Task<bool> EnforceMemoryBudget(string model, CancellationToken ct, bool allowUnloaded = false)
+    {
+        var budget = MemoryBudget;
+        if (!budget.Enabled) return true;
+        var runtime = RuntimeModel(model);
+        var residents = await ResourceReader.Residents(Http, ct);
+        var allocation = residents?.FirstOrDefault(entry => entry.Name.Equals(runtime, StringComparison.OrdinalIgnoreCase));
+        if (allowUnloaded && residents != null && allocation == null) return false;
+        var rejection = budget.Rejection(allocation);
+        if (rejection == null) return true;
+        using var unload = await Post("/api/generate", new { model = runtime, keep_alive = 0 }, ct);
+        if (!unload.IsSuccessStatusCode) rejection += " Ollama could not unload the model.";
+        throw new ModelMemoryBudgetException(rejection);
     }
     public async Task<HttpResponseMessage> Post(string route,object body,CancellationToken ct)=>await Http.SendAsync(new HttpRequestMessage(HttpMethod.Post,route){Content=new StringContent(JsonSerializer.Serialize(body),Encoding.UTF8,"application/json")},HttpCompletionOption.ResponseHeadersRead,ct);
     public static async Task Check(HttpResponseMessage response,CancellationToken ct){if(!response.IsSuccessStatusCode){var body=await response.Content.ReadAsStringAsync(ct);throw new Exception(JsonNode.Parse(body)?["error"]?.ToString()??body);}}
     public async Task Chat(Conversation chat,Action<string> chunk,CancellationToken ct,bool? thinking = null)
     {
+        if (Compatible) { await CompatibleChat(chat, chunk, ct); return; }
         var messages=new List<object>{new{role="system",content="You are a helpful local assistant. Be direct and accurate. Describe image details carefully. You have no file-editing tools in Chat mode; do not claim you changed files."}};
         if(chat.ContextSummary.Length>0)messages.Add(new{role="user",content="Carry-forward notes: "+chat.ContextSummary});
+        if (chat.DocumentContext is { } sources) messages.Insert(0, new { role = "system", content = DocumentInstructions + sources });
         var recent=chat.Messages.Skip(chat.CompactedMessageCount).Where(m=>m.Text.Length>0||m.Images.Count>0).ToList();
         foreach(var m in recent){if(m.Role=="assistant"&&m.Text.Length==0)continue;messages.Add(new{role=m.Role,content=m.Text+AttachedFiles.Context(m.Files,false),images=m.Images.Where(File.Exists).Select(p=>Convert.ToBase64String(File.ReadAllBytes(p))).ToArray()});}
         var request=JsonSerializer.SerializeToNode(new{model=RuntimeModel(chat.Model),messages,stream=true,think=thinking??chat.Thinking,keep_alive="10m",options=new{num_ctx=chat.ContextTokens,num_predict=chat.OutputTokens,temperature=0.6,top_k=20,top_p=0.95,min_p=0,repeat_penalty=1}})!.AsObject();
