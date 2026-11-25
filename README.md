@@ -2,11 +2,28 @@
 
 LocalDesk is a Windows desktop workspace for local AI models. It connects to Ollama and includes chat, project search, reviewable file and command tools, and model management.
 
+## LocalDesk 1.3 beta
+
+- Press Ctrl+K and choose **Find a model that fits** for benchmark-backed context suggestions or labeled weight-size estimates. Incomplete project runs can suggest a compatible alternative before you approve a handoff.
+- **Ask a document folder** searches Markdown, text, DOCX, and PDFs with selectable text. Numbered source cards show the matching page, paragraph, or lines. The app refreshes changed files when you ask again. The document search uses term matching.
+- **Model connections** accepts an Ollama LAN address or an OpenAI-compatible text-chat server. The app shows the endpoint that receives prompts. OpenAI-compatible mode has no model-memory telemetry.
+- **Project MCP tools** saves a loopback HTTP MCP endpoint per project and prompts before each manually selected tool advertised as read-only. You can inspect its result and put it in your chat draft.
+- **Dictate** uses an installed Windows desktop speech recognizer. **Read aloud** uses an installed Windows desktop voice. Use Ctrl+K → **Stop reading aloud** to stop playback.
+
+## Start with the portable beta
+
+Extract the Windows x64 ZIP to a writable folder and open `LocalDesk.exe`. Install [Ollama for Windows](https://ollama.com/download/windows) if needed. Use **Model setup** to select an installed model or download the suggested 2.5 GB starter. The portable package includes .NET and the Cline CLI used by Project agent.
+
+- **Chat** is the default for new installations. Choose **Open a project** to work in a folder, or **Try a sample project** to practice on a separate workspace created by LocalDesk.
+- **Review changes and checks** opens the latest project result, with verified files, diffs, and check outcomes. **Hand off to another model** is available after an incomplete project run and requires choosing and confirming a model.
+- **Projects** stores a model, instructions, pinned files, checks, and approval preferences for each saved folder. **Settings** controls the theme, chat text size, activity pane, and defaults for new chats.
+- **Settings → Advanced and memory budgets** applies optional RAM and VRAM budgets per model. LocalDesk uses Ollama’s reported total model memory and VRAM and treats the difference as estimated RAM. It unloads an over-budget model before inference starts. The check happens after preload, so memory can briefly exceed a budget. Zero disables that budget.
+
 ## Build and run
 
 1. Install the .NET 9 SDK and Ollama, then start Ollama.
 2. From the repository root, run `dotnet build LocalDesk.csproj`.
-3. Run `dotnet run --project LocalDesk.csproj` and choose an installed model. For project work, choose the project folder in the app.
+3. Run `dotnet run --project LocalDesk.csproj` and choose an installed model. For project work, put the Windows Cline CLI in runtime/cline.exe beside the running executable and choose the project folder in the app.
 
 Licensed under the [MIT License](LICENSE). See [Third-party notices](ThirdPartyNotices.txt) for dependencies.
 
@@ -45,14 +62,14 @@ Open LocalDesk.exe. Keep this folder and its runtime subfolder together.
 
 - **Startup:** models load on demand by default. Enable **Load a model at startup** in Settings if preferred. This does not unload a model another Ollama client already has running.
 - **Models:** discover installed Ollama models, download a model by its Ollama tag, or import local GGUF files. For vision imports, select the matching projector alongside the model. Downloads show progress and can be cancelled and resumed by retrying. Import with a new name to preserve existing models. Select a model in the library to see what it is best for and whether Ollama reports image input and project tools.
-- **New chats:** start in Project agent mode using your Windows Documents folder. Both defaults can be changed in Settings. Existing chats keep their selected model, mode and project folder. Clearing the working-folder box uses the configured default. The folder must exist.
+- **New chats:** start in Chat mode unless you select Project agent by default in Settings. Existing chats keep their selected model, mode, and project folder. Project agent requires a folder.
 - **Attachments:** drag files into the window or use **+ File**. Project agent receives original file paths, including files outside its working folder. Text/code also gets a saved preview; images are sent visually to compatible models.
 - **Project agent:** can edit files and run commands with your Windows account. Ask it to change the files you intend. It does not automatically rebuild a separately packaged application unless requested. It is instructed to narrow searches to relevant files rather than scan your entire Documents folder.
 - **Results:** compact green cards show Outcome, Checks and Remaining. Long summaries and earlier response details can be expanded. Existing output files remain linked; paths are available on hover.
 - **Stop and time limits:** Stop cancels a request; existing edits remain. Choose a preset, custom limit or No time limit.
 - **History:** saved locally in `data/chats.json`; attachments and agent sessions are also in `data`. Updating the program preserves this directory.
 
-Defaults are 32,768 context tokens and 8,192 maximum output tokens, adjustable per chat with Tokens. Ollama and .NET 9 must remain installed. No LM Studio server or VS Code is needed. Downloading models requires internet; installed local models can run offline. Agent commands may access the internet when required by the requested work.
+Context and output defaults depend on the model. Adjust them under **Profile**. The portable release includes .NET. Ollama is required. Downloading models requires an internet connection and installed models can run offline.
 
 ## Updates
 

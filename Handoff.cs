@@ -53,13 +53,25 @@ public sealed partial class MainWindow
         }
         var user=current.Messages.Take(index).LastOrDefault(m=>m.Role=="user");
         if(user==null)return;
-        var choices=availableModels.Where(item=>item.Id!=current.Model).ToList();
+        List<FitChoice> fits;
+        using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12)))
+        {
+            try { fits = await FindModelFits(timeout.Token); }
+            catch (Exception) { fits = []; }
+        }
+        if (busy || !ReferenceEquals(chat, current)) return;
+        var needsVision = user.Images.Count > 0;
+        var recommended = fits.Where(item => item.Model.Id != current.Model && item.Tools && (!needsVision || item.Vision) && item.Fits)
+            .OrderByDescending(item => item.Measured).ThenByDescending(item => item.Context).FirstOrDefault();
+        var choices=installedModels.Where(item=>item.Id!=current.Model).ToList();
         if(choices.Count==0){status.Text="Install another local model to use handoff.";return;}
         var dialog=UtilityWindow("Hand off to another model",690,400);
         var panel=new StackPanel{Margin=new Thickness(22),Spacing=11};
         panel.Children.Add(new TextBlock{Text="Hand off the current task",FontSize=23,FontWeight=FontWeight.SemiBold});
         panel.Children.Add(EvidenceText("The next model gets the original request, verified file changes, recent tool notes, and failed checks. It starts a fresh agent session and asks before edits or commands."));
-        var selected=new ComboBox{ItemsSource=choices,SelectedIndex=0};
+        var selected=new ComboBox{ItemsSource=choices,SelectedItem=choices.FirstOrDefault(item => item.Id == recommended?.Model.Id) ?? choices[0]};
+        panel.Children.Add(EvidenceText(recommended == null ? "No alternative with a verified capability and a likely memory fit was found."
+            : $"Suggested: {recommended.Model.Name} supports project tools{(needsVision ? " and images" : "")}. {recommended.Reason}."));
         panel.Children.Add(selected);
         panel.Children.Add(EvidenceText("Working folder · "+current.Project));
         panel.Children.Add(EvidenceText($"{reply.VerifiedFiles.Count} verified file changes in the previous run."));
@@ -93,6 +105,11 @@ public sealed partial class MainWindow
         if(busy || !ReferenceEquals(chat,current) || !current.Project.Equals(reply.ProjectUsed,StringComparison.OrdinalIgnoreCase))return;
         current.Model=next.Id;
         ApplyProfile(next.Id);
+        if (next.Id == recommended?.Model.Id)
+        {
+            current.ContextTokens = recommended.Context;
+            current.OutputTokens = Math.Min(current.OutputTokens, recommended.Context / 3);
+        }
         changing=true;
         model.SelectedItem=next;
         ToolTip.SetTip(model,next.Note);

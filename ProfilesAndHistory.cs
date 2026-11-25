@@ -9,10 +9,16 @@ public sealed record ModelProfile(int Context, int Output, bool Thinking);
 
 public sealed partial class MainWindow
 {
+    ModelProfile ProfileFor(string modelId)
+    {
+        var fallback = modelId == LocalModel.Fast.Id ? new ModelProfile(32768, 8192, false)
+            : new ModelProfile(16384, 4096, false);
+        return preferences.Profiles.GetValueOrDefault(modelId, fallback);
+    }
+
     void ApplyProfile(string modelId)
     {
-        var fallback = modelId == LocalModel.Large.Id ? new ModelProfile(16384, 4096, false) : new ModelProfile(32768, 8192, false);
-        var profile = preferences.Profiles.GetValueOrDefault(modelId, fallback);
+        var profile = ProfileFor(modelId);
         current.ContextTokens = profile.Context;
         current.OutputTokens = profile.Output;
         current.Thinking = profile.Thinking;

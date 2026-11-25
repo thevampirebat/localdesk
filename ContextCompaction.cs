@@ -16,6 +16,7 @@ public sealed class ContextCompaction(OllamaClient client)
     public event Action<int,int>? ToolResultsReduced;
     public bool ReduceDuplicateReads { get; set; }
     internal string ActiveTask { get; set; } = "";
+    internal Action? BeforeAutomaticCompaction { get; set; }
     public int Budget=>Math.Max(512,Math.Min((int)(Chat.ContextTokens*.72),Chat.ContextTokens-Chat.OutputTokens-1024));
     public static int Estimate(JsonNode? value)
     {
@@ -105,6 +106,8 @@ public sealed class ContextCompaction(OllamaClient client)
                 return ReportPrepared();
             }
             if(start<=1&&force)start=messages.Count;
+            BeforeAutomaticCompaction?.Invoke();
+            ct.ThrowIfCancellationRequested();
             Status?.Invoke("Auto-compacting older context; keeping recent tool calls…");
             var evidence=Evidence(messages.Take(start),Chat.ContextTokens);
             var summary=WithVerifiedProgress(await Summarize(evidence,Chat.Model,Chat.ContextTokens,ct));

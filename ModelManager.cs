@@ -13,25 +13,49 @@ public sealed partial class MainWindow
 {
  async Task RefreshModels()
  {
-  var old=changing;changing=true;ollama.ClearCapabilities();
-  try{await ollama.Connect(CancellationToken.None);using var r=await ollama.Http.GetAsync("/api/tags");r.EnsureSuccessStatusCode();availableModels=(JsonNode.Parse(await r.Content.ReadAsStringAsync())?["models"]?.AsArray()??[]).Select(m=>m?["name"]?.ToString()??"").Where(n=>n.Length>0&&!n.StartsWith("localdesk-",StringComparison.OrdinalIgnoreCase)).Select(LocalModel.FromTag).OrderBy(m=>m.Id==LocalModel.Fast.Id?0:m.Id==LocalModel.Large.Id?1:2).ToList();}
-  catch(Exception e){status.Text="Could not refresh models: "+e.Message;}
-  finally{if(!availableModels.Any(m=>m.Id==current.Model))availableModels.Add(LocalModel.FromTag(current.Model));model.ItemsSource=availableModels.ToList();model.SelectedItem=availableModels.First(m=>m.Id==current.Model);ToolTip.SetTip(model,SelectedModel.Note);changing=old;}
+  var previous = changing;
+  changing = true;
+  ollama.ClearCapabilities();
+  try
+  {
+      using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+      await ollama.Connect(timeout.Token);
+      using var response = await ollama.Http.GetAsync(ollama.ModelListPath, timeout.Token);
+      response.EnsureSuccessStatusCode();
+      var data = JsonNode.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
+      installedModels = (data?[ollama.Compatible ? "data" : "models"]?.AsArray() ?? []).Select(item => item?[ollama.Compatible ? "id" : "name"]?.ToString() ?? "")
+          .Where(tag => tag.Length > 0 && !tag.StartsWith("localdesk-", StringComparison.OrdinalIgnoreCase))
+          .Select(LocalModel.FromTag).ToList();
+      ollamaReady = true;
+      connection.Text = installedModels.Count == 0 ? "●  No models available" : "●  " + ollama.Http.BaseAddress!.Authority;
+      if (current.Messages.Count == 0 && preferences.DefaultModel == null && Projects.Find(current.Project)?.Model == null
+          && installedModels.Count > 0 && installedModels.All(item => item.Id != current.Model))
+      {
+          current.Model = installedModels[0].Id;
+          ApplyProfile(current.Model);
+          Save();
+      }
+  }
+  catch (Exception error)
+  {
+      ollamaReady = false;
+      installedModels = [];
+      connection.Text = "●  Ollama unavailable";
+      status.Text = error is OperationCanceledException ? "Ollama did not respond. Open Model setup to retry." : error.Message;
+  }
+  finally
+  {
+      availableModels = installedModels.ToList();
+      if (availableModels.All(item => item.Id != current.Model)) availableModels.Add(LocalModel.FromTag(current.Model));
+      model.ItemsSource = availableModels.ToList();
+      model.SelectedItem = availableModels.First(item => item.Id == current.Model);
+      ToolTip.SetTip(model, SelectedModel.Note);
+      changing = previous;
+      UpdateSetupStatus();
+  }
  }
- async Task Preferences()
- {
-  if(busy)return;
-  var dialog=new Window{Title="LocalDesk settings",Width=550,Height=480,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#1C232B")};
-  var agentDefault=new CheckBox{Content="Start new chats in Project agent mode",IsChecked=preferences.StartInAgent};
-  var startup=new CheckBox{Content="Load a model at startup",IsChecked=preferences.LoadModelAtStartup};
-  var alerts=new CheckBox{Content="Show Windows notifications for background runs",IsChecked=preferences.RunNotifications};
-  var tokenGuard=new CheckBox{Content="Token Guard · shorten repeated file results",IsChecked=preferences.ReduceDuplicateReads};
-  var folder=new TextBox{Text=preferences.Folder,PlaceholderText="Default working folder"};
-  var note=new TextBlock{Text="New chats use this folder. Drop files from anywhere; their original paths are available to the agent. Existing chats keep their settings.",TextWrapping=Avalonia.Media.TextWrapping.Wrap,FontSize=13};
-  var panel=new StackPanel{Margin=new Thickness(24),Spacing=16};panel.Children.Add(new TextBlock{Text="Make yourself at home",FontSize=22});panel.Children.Add(agentDefault);panel.Children.Add(startup);panel.Children.Add(alerts);panel.Children.Add(tokenGuard);panel.Children.Add(folder);panel.Children.Add(note);
-  var row=new StackPanel{Orientation=Orientation.Horizontal,Spacing=10};row.Children.Add(Button("Cancel",(_,_)=>dialog.Close()));row.Children.Add(Button("Save",(_,_)=>{var path=folder.Text?.Trim()??"";if(!Path.IsPathFullyQualified(path)||!Directory.Exists(path)){note.Text="Enter an existing, absolute folder path.";return;}preferences.StartInAgent=agentDefault.IsChecked==true;preferences.LoadModelAtStartup=startup.IsChecked==true;preferences.RunNotifications=alerts.IsChecked==true;preferences.ReduceDuplicateReads=tokenGuard.IsChecked==true;preferences.WorkingFolder=path;preferences.Save(store.Root);dialog.Close();status.Text="Settings saved.";}));panel.Children.Add(row);dialog.Content=panel;await dialog.ShowDialog(this);
- }
- async Task ManageModels()
+
+ async Task ManageModels(string? suggested = null)
  {
   if(busy)return;await RefreshModels();
   var dialog=new Window{Title="LocalDesk · Models",Width=700,Height=700,MinHeight=560,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#1C232B")};
@@ -39,11 +63,12 @@ public sealed partial class MainWindow
   var heading=new Grid{ColumnDefinitions=new ColumnDefinitions("*,Auto")};
   heading.Children.Add(new TextBlock{Text="Model library",FontSize=24,FontWeight=Avalonia.Media.FontWeight.SemiBold,VerticalAlignment=VerticalAlignment.Center});
   var storage=Button("Storage…",async(_,_)=>await ManageModelStorage(dialog));
+  storage.IsEnabled = !ollama.Compatible && ollama.Http.BaseAddress == OllamaClient.DefaultOrigin;
   Grid.SetColumn(storage,1);
   heading.Children.Add(storage);
   panel.Children.Add(heading);
-  panel.Children.Add(new TextBlock{Text="Download an Ollama model tag, or import local GGUF files. Image input and project tools depend on the model. Models larger than your 16 GB VRAM may run slowly.",TextWrapping=Avalonia.Media.TextWrapping.Wrap,FontSize=13});
-  var installed=new ListBox{ItemsSource=availableModels.ToList(),SelectedItem=availableModels.FirstOrDefault(m=>m.Id==current.Model),Height=145};panel.Children.Add(installed);
+  panel.Children.Add(new TextBlock{Text="Choose an installed model, download an Ollama tag, or import GGUF files. Larger models and contexts use more memory.",TextWrapping=Avalonia.Media.TextWrapping.Wrap,FontSize=13});
+  var installed=new ListBox{ItemsSource=installedModels,SelectedItem=installedModels.FirstOrDefault(m=>m.Id==current.Model)??installedModels.FirstOrDefault(),Height=145};panel.Children.Add(installed);
   var useCase = new TextBlock { FontSize = 14, TextWrapping = Avalonia.Media.TextWrapping.Wrap };
   var capabilities = new TextBlock { FontSize = 12, Foreground = Brush("#AFC9BA"), TextWrapping = Avalonia.Media.TextWrapping.Wrap };
   var description = new StackPanel { Spacing = 6, Children = { useCase, capabilities } };
@@ -81,9 +106,9 @@ public sealed partial class MainWindow
   }
   installed.SelectionChanged += async (_, _) => await ShowModelDetails();
   dialog.Opened += async (_, _) => await ShowModelDetails();
-  var name=new TextBox{PlaceholderText="Ollama tag to download, or name for GGUF import"};panel.Children.Add(name);
+  var name=new TextBox{Text=suggested,PlaceholderText="Ollama tag to download, or name for GGUF import"};panel.Children.Add(name);
   var progress=new ProgressBar{Minimum=0,Maximum=100,Height=5};panel.Children.Add(progress);
-  var info=new TextBlock{Text="Choose an installed model to use, or enter a model tag below.",TextWrapping=Avalonia.Media.TextWrapping.Wrap,FontSize=13};panel.Children.Add(info);
+  var info=new TextBlock{Text=suggested==StarterModel?StarterDownload+" to download.":"Enter an Ollama tag to download a model.",TextWrapping=Avalonia.Media.TextWrapping.Wrap,FontSize=13};panel.Children.Add(info);
   var localFiles=new List<string>();
   var picker=Button("Choose GGUF files…",async(_,_)=>{var files=await dialog.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions{Title="Select model GGUF (include matching vision projector if needed)",AllowMultiple=true,FileTypeFilter=[new FilePickerFileType("GGUF models"){Patterns=["*.gguf"]}]});if(files.Count>0){localFiles=files.Select(f=>f.Path.LocalPath).ToList();info.Text=string.Join(", ",localFiles.Select(Path.GetFileName));}});panel.Children.Add(picker);
   panel.Children.Add(new TextBlock{Text="For GGUF import, select the model and its matching vision projector together. Use original names for split shards. Compatibility depends on Ollama support.",TextWrapping=Avalonia.Media.TextWrapping.Wrap,FontSize=12,Foreground=Brush("#A2AAA7")});
@@ -93,6 +118,8 @@ public sealed partial class MainWindow
   void Toggle(bool value){running=value;foreach(var c in new Control[]{download!,import!,use!,refresh!,picker,name,installed,storage})c.IsEnabled=!value;}
   async Task Install(bool fromFile)
   {
+   if (ollama.Compatible || ollama.Http.BaseAddress != OllamaClient.DefaultOrigin)
+   { info.Text = "Install models directly on the server."; return; }
    var tag=name.Text?.Trim()??"";
    if(!System.Text.RegularExpressions.Regex.IsMatch(tag,@"^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$")||tag.StartsWith("localdesk-",StringComparison.OrdinalIgnoreCase)||tag.Contains("..")){info.Text="Enter a valid model name, such as qwen3.5:4b or my-model:latest.";return;}
    if(fromFile&&availableModels.Any(m=>m.Id==(tag.Contains(':')?tag:tag+":latest"))){info.Text="That model name already exists. Choose a new name for your import.";return;}
@@ -110,14 +137,14 @@ public sealed partial class MainWindow
      }finally{if(File.Exists(file))File.Delete(file);}
     }
     else await ModelDownloads.Pull(ollama,tag,(label,percent)=>{info.Text=label;progress.Value=percent;},operation.Token);
-    progress.Value=100;await RefreshModels();installed.ItemsSource=availableModels.ToList();installed.SelectedItem=availableModels.FirstOrDefault(m=>m.Id==(tag.Contains(':')?tag:tag+":latest"));info.Text="Installed. Select it and choose Use model.";
+    progress.Value=100;await RefreshModels();installed.ItemsSource=installedModels;installed.SelectedItem=installedModels.FirstOrDefault(m=>m.Id==(tag.Contains(':')?tag:tag+":latest"));info.Text="Installed. Select it and choose Use model.";
    }
    catch(OperationCanceledException){info.Text="Installation cancelled. Completed downloads remain available to resume.";}
    catch(Exception e){info.Text="Could not install: "+e.Message;}
    finally{operation.Dispose();operation=null;Toggle(false);}
   }
   download=Button("Download",async(_,_)=>await Install(false));import=Button("Import GGUF",async(_,_)=>await Install(true));
-  refresh=Button("Refresh",async(_,_)=>{await RefreshModels();installed.ItemsSource=availableModels.ToList();});
+  refresh=Button("Refresh",async(_,_)=>{await RefreshModels();installed.ItemsSource=installedModels;});
   string? selection=null;use=Button("Use model",(_,_)=>{if(installed.SelectedItem is LocalModel m){selection=m.Id;dialog.Close();}});
   foreach(var b in new[]{download,import,refresh,use}){b.Margin=new Thickness(0,0,6,6);row.Children.Add(b);}row.Children.Add(Button("Cancel download",(_,_)=>operation?.Cancel()));
   dialog.Closing+=(_,e)=>{if(running){operation?.Cancel();e.Cancel=true;info.Text="Cancelling… close again when finished.";}};

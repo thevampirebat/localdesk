@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 namespace LocalDesk;
 static class ModelChecks
 {
@@ -18,7 +19,57 @@ static class ModelChecks
   var a=OllamaClient.RuntimeModel("custom:a");var b=OllamaClient.RuntimeModel("custom:b");if(a==b||a==OllamaClient.RuntimeModel(LocalModel.Large.Id)||a!=OllamaClient.RuntimeModel("custom:a"))throw new Exception("Custom runtime routing failed.");
   double value=0;var client=new OllamaClient(new Handler("{\"status\":\"pulling\",\"total\":100,\"completed\":50}\n{\"status\":\"success\"}\n"));await ModelDownloads.Pull(client,"custom:test",(_,v)=>value=Math.Max(value,v),ct);if(value!=50)throw new Exception("Download progress failed.");
   foreach(var bad in new[]{"{\"error\":\"test failure\"}\n","{\"status\":\"pulling\"}\n"}){bool failed=false;try{await ModelDownloads.Pull(new OllamaClient(new Handler(bad)),"custom:test",(_,_)=>{},ct);}catch{failed=true;}if(!failed)throw new Exception("Incomplete model download accepted.");}
-  var settings=new DeskSettings();if(!settings.StartInAgent||settings.LoadModelAtStartup||settings.Folder!=Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments))throw new Exception("Startup defaults failed.");
+  var settings=new DeskSettings();if(settings.StartInAgent||settings.LoadModelAtStartup||settings.Folder!=Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments))throw new Exception("Startup defaults failed.");
+  await CheckMemoryBudget(ct);
   var text=new string('x',720)+"\n- Outcome: Edited the file.\n- Checks: Build passed.\n- Remaining: One failing test.";var preview=SummaryPreview.Create(text);if(!preview.Contains("One failing test")||preview.Length>700)throw new Exception("Summary omitted remaining work.");
+ }
+
+ sealed class MemoryHandler(string runtime) : HttpMessageHandler
+ {
+     public string? Unloaded { get; private set; }
+     public int Reads { get; private set; }
+     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+     {
+         if (request.RequestUri?.AbsolutePath == "/api/ps")
+         {
+             Reads++;
+             return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new
+             {
+                 models = new[]
+                 {
+                     new { name = "other-client:latest", size = 6L << 30, size_vram = 4L << 30 },
+                     new { name = runtime, size = 8L << 30, size_vram = 5L << 30 }
+                 }
+             })) };
+         }
+         using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+         if (request.RequestUri?.AbsolutePath != "/api/generate" || body.RootElement.GetProperty("keep_alive").GetInt32() != 0)
+             throw new InvalidOperationException("The budget issued an unexpected request.");
+         Unloaded = body.RootElement.GetProperty("model").GetString();
+         return new(HttpStatusCode.OK);
+     }
+ }
+
+ static async Task CheckMemoryBudget(CancellationToken ct)
+ {
+     const string model = "budget:model";
+     var runtime = OllamaClient.RuntimeModel(model);
+     var handler = new MemoryHandler(runtime);
+     var client = new OllamaClient(handler);
+     await client.EnforceMemoryBudget(model, ct);
+     if (handler.Reads != 0) throw new Exception("Disabled memory budgets contacted Ollama.");
+     client.MemoryBudget = new(3, 5);
+     await client.EnforceMemoryBudget(model, ct);
+     if (handler.Unloaded != null) throw new Exception("A model at the memory budget was unloaded.");
+     foreach (var caps in new[] { new ModelMemoryBudget(2, 0), new ModelMemoryBudget(0, 4) })
+     {
+         client.MemoryBudget = caps;
+         try
+         {
+             await client.EnforceMemoryBudget(model, ct);
+             throw new Exception("An over-budget model was allowed to start.");
+         }
+         catch (ModelMemoryBudgetException) when (handler.Unloaded == runtime) { }
+     }
  }
 }

@@ -122,7 +122,10 @@ public sealed class ProjectEvidence
         return changes;
     }
 
-    private Dictionary<string, Stamp> Capture()
+    internal Dictionary<string, string> ProgressStamp(bool starting = false) =>
+        (starting ? before : Capture(keepBytes: false)).ToDictionary(entry => entry.Key, entry => entry.Value.Hash, StringComparer.OrdinalIgnoreCase);
+
+    private Dictionary<string, Stamp> Capture(bool keepBytes = true)
     {
         var files = new Dictionary<string, Stamp>(StringComparer.OrdinalIgnoreCase);
         var paths = attachments.AsEnumerable();
@@ -143,7 +146,7 @@ public sealed class ProjectEvidence
                 using var stream = info.Open(FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                 byte[]? bytes = null;
                 string hash;
-                if (info.Length <= ReviewSizeLimit && AttachedFiles.IsText(path))
+                if (keepBytes && info.Length <= ReviewSizeLimit && AttachedFiles.IsText(path))
                 {
                     bytes = new byte[(int)info.Length];
                     stream.ReadExactly(bytes);

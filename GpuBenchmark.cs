@@ -55,6 +55,8 @@ public sealed partial class MainWindow
 {
     async Task ShowGpuBenchmark()
     {
+        if (ollama.Compatible || !ollama.Http.BaseAddress!.IsLoopback)
+        { status.Text = "GPU benchmarking needs Ollama running on this PC."; return; }
         if(busy)return;
         var selected=SelectedModel;
         var dialog=UtilityWindow("Benchmark context profiles",820,530);

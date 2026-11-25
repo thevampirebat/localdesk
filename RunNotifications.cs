@@ -134,12 +134,13 @@ public sealed partial class MainWindow
     async Task<T> ShowRunApproval<T>(Window dialog)
     {
         approvalWindow = dialog;
+        UpdateRunState();
         try
         {
             NotifyRun(current, activeMessage, "LocalDesk needs your approval", "Open LocalDesk to review the proposed action.");
             return await dialog.ShowDialog<T>(this);
         }
-        finally { approvalWindow = null; RecordRunProgress(); }
+        finally { approvalWindow = null; UpdateRunState(); RecordRunProgress(); }
     }
 
     void NotifyRun(Conversation chat, ChatMessage? reply, string title, string detail)

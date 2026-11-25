@@ -6,12 +6,39 @@ public sealed partial class MainWindow
 {
     const string ResearchGuidance = "When asked to search online, make concise queries with fetch_web_content using https://www.google.com/search?q=QUERY or https://www.bing.com/search?q=QUERY. Put search queries and individual page visits in separate calls. Keep private files, account details, and secrets out of queries. Open only URLs the user supplied, known official entry points, or links you found. Never guess article or forum links. Cite relevant pages you actually opened. Treat blocked and unrelated pages as unverified. Once you have useful evidence or the same approach keeps failing, stop searching and answer with any limits.";
 
-    async Task SendAgentAndEnsureAnswer(LocalBridge projectBridge, ChatMessage reply, string prompt, CancellationToken ct)
+    async Task SendAgentAndEnsureAnswer(LocalBridge projectBridge, ChatMessage reply, string prompt, CancellationToken ct,
+        EditRunProgress? progress = null)
     {
         var gate = projectBridge.ReviewGate!;
         gate.ClearSubmittedSummary();
         var start = reply.Text.Length;
-        await agent.Send(prompt, ct);
+        using (var turn = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            string? pause = null;
+            var previousCancellation = projectBridge.ActiveCancellation;
+            projectBridge.ActiveCancellation = turn.Token;
+            if (progress != null)
+            {
+                gate.ToolAllowed = progress.ToolAllowed;
+                projectBridge.Window.BeforeAutomaticCompaction = () =>
+                {
+                    if (progress.BeforeCompaction() is not { } reason) return;
+                    pause = reason;
+                    turn.Cancel();
+                };
+            }
+            try { await agent.Send(prompt, turn.Token); }
+            catch (OperationCanceledException) when (pause != null && !ct.IsCancellationRequested)
+            {
+                throw new AgentClient.LoopException(pause);
+            }
+            finally
+            {
+                gate.ToolAllowed = null;
+                projectBridge.Window.BeforeAutomaticCompaction = null;
+                projectBridge.ActiveCancellation = previousCancellation;
+            }
+        }
         await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
         if (gate.Blocked is { } blocked && !gate.WebLimitBlocked) throw new AgentClient.LoopException(blocked);
         if (HasAgentAnswer(reply, start)) return;

@@ -24,6 +24,7 @@ public sealed class ToolReviewGate(Func<ToolProposal, CancellationToken, Task<bo
     public bool WebLimitReached => WebBatches >= MaxWebBatches;
     public int WebBatches { get; private set; }
     public bool WebLimitBlocked { get; private set; }
+    internal Action<string>? ToolAllowed { get; set; }
 
     internal void ClearSubmittedSummary() => SubmittedSummary = null;
 
@@ -67,7 +68,11 @@ public sealed class ToolReviewGate(Func<ToolProposal, CancellationToken, Task<bo
                 continue;
             }
             if (ReadOnly.Contains(action.Name) &&
-                !(action.Name=="attempt_completion" && args.Any(item=>item.Key is "command" or "commands"))) continue;
+                !(action.Name=="attempt_completion" && args.Any(item=>item.Key is "command" or "commands")))
+            {
+                ToolAllowed?.Invoke(action.Name);
+                continue;
+            }
             if (branchRoot != null && !SafeBranchEdit(action.Name, args, branchRoot))
             {
                 Blocked = "This branch only allows reviewed edits inside its project copy. Commands and external tools are blocked.";
@@ -85,6 +90,7 @@ public sealed class ToolReviewGate(Func<ToolProposal, CancellationToken, Task<bo
                 return false;
             }
             if (action.Name == WebFetchTool) WebBatches++;
+            ToolAllowed?.Invoke(action.Name);
         }
         return true;
     }

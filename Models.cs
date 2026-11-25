@@ -39,6 +39,7 @@ public class ChatMessage
     public string? PauseReason {get;set;}
     public string AcceptanceCriteria { get; set; } = "";
     public bool Successful {get;set;}
+    public bool ExpectedEdits {get;set;}
     public List<ArtifactLink> Artifacts {get;set;}=[];
     public string Marker {get;set;}=Guid.NewGuid().ToString("N");
 }
@@ -56,6 +57,7 @@ public class Conversation
     public int OutputTokens {get;set;}=8192;
     public int TimeLimitMinutes {get;set;}=5;
     public string ContextSummary {get;set;}="";
+    [System.Text.Json.Serialization.JsonIgnore] internal string? DocumentContext { get; set; }
     public int CompactedMessageCount {get;set;}
     public string BridgeSummary {get;set;}="";
     public string BridgeBoundary {get;set;}="";
@@ -92,7 +94,27 @@ public sealed class ChatStore
     public string Root {get;}
     public List<Conversation> Chats {get;private set;}=[];
     public ChatStore() : this(Path.Combine(AppContext.BaseDirectory, "data")) { }
-    internal ChatStore(string root){Root=root;Directory.CreateDirectory(Root);try{Chats=JsonSerializer.Deserialize<List<Conversation>>(File.ReadAllText(Path.Combine(Root,"chats.json")))??[];}catch{}}
+    internal ChatStore(string root)
+    {
+        Root=root;
+        Directory.CreateDirectory(Root);
+        try { Chats=JsonSerializer.Deserialize<List<Conversation>>(File.ReadAllText(Path.Combine(Root,"chats.json")))??[]; }
+        catch { }
+        foreach (var chat in Chats)
+        {
+            var expectsChanges = false;
+            foreach (var message in chat.Messages)
+            {
+                if (message.Role == "user") expectsChanges = EditRunOutcome.ExpectsChanges(message.Text, expectsChanges);
+                else if (message.Role == "assistant")
+                {
+                    message.ExpectedEdits |= expectsChanges && message.ProjectUsed != null;
+                    if (message.Successful) EditRunOutcome.MarkUnverified(message, message.ExpectedEdits);
+                    expectsChanges = message.ExpectedEdits || message.VerifiedFiles.Count > 0;
+                }
+            }
+        }
+    }
     public void Save(){var path=Path.Combine(Root,"chats.json");File.WriteAllText(path+".tmp",JsonSerializer.Serialize(Chats,new JsonSerializerOptions{WriteIndented=true}));File.Move(path+".tmp",path,true);}
     public string ImportImage(string file,string chatId){var dir=Path.Combine(Root,"images",chatId);Directory.CreateDirectory(dir);var dest=Path.Combine(dir,Guid.NewGuid().ToString("N")+Path.GetExtension(file));File.Copy(file,dest);return dest;}
     public void Delete(Conversation chat){Chats.Remove(chat);Save();var dir=Path.Combine(Root,"images",chat.Id);if(Directory.Exists(dir))Directory.Delete(dir,true);}
@@ -101,10 +123,17 @@ public sealed class ChatStore
 public sealed class DeskSettings
 {
  public bool LoadModelAtStartup {get;set;}=false;
- public bool StartInAgent {get;set;}=true;
+ public bool StartInAgent {get;set;}=false;
  public bool ShowActivity {get;set;}=true;
  public bool RunNotifications { get; set; } = true;
  public bool ReduceDuplicateReads { get; set; } = true;
+ public string Theme { get; set; } = "System";
+ public int ChatTextSize { get; set; } = 16;
+ public decimal ModelRamGiB { get; set; }
+ public decimal ModelVramGiB { get; set; }
+ public string? DefaultModel { get; set; }
+ public string? ServerOrigin { get; set; }
+ public bool CompatibleServer { get; set; }
  public Dictionary<string,ModelProfile> Profiles {get;set;}=new(StringComparer.OrdinalIgnoreCase);
  public Dictionary<string,List<GpuBenchmarkSample>> Benchmarks {get;set;}=new(StringComparer.OrdinalIgnoreCase);
  public string WorkingFolder {get;set;}=Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
